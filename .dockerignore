@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.env
+.env.local
+.env*.local
+*service-account*.json
+gcp-key*.json
+npm-debug.log*
+README.md
+DECISIONS.md
+scripts

@@ -1,0 +1,507 @@
+// Cost Control Center — database schema
+// Implements spec §10, with enforcement/capability enums tightened per §9,
+// §21 and §34.2 so the UI can be capability-driven rather than guessing.
+// Single-tenant (see DECISIONS.md) — no tenant_id anywhere by design.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+
+enum Provider {
+  GOOGLE_CLOUD
+  OPENAI
+  ANTHROPIC
+  RENDER
+}
+
+enum ConnectionStatus {
+  PENDING
+  CONNECTED
+  ERROR
+  DISCONNECTED
+}
+
+enum ConnectionAuthType {
+  WORKLOAD_IDENTITY
+  SERVICE_ACCOUNT_KEY
+  ADMIN_API_KEY
+}
+
+enum AllocationMode {
+  FULL
+  PERCENTAGE
+  LABELS
+  CUSTOM_RULE
+}
+
+enum AllocationConfidence {
+  EXACT
+  ESTIMATED
+}
+
+enum BudgetScopeType {
+  PROVIDER_ACCOUNT
+  PROVIDER_RESOURCE
+  MANAGED_APP
+}
+
+// Whether a "stop" claim is honest depends on whether the mode is genuinely enforced by
+// the provider or by our own executed stop action.
+enum EnforcementType {
+  INTERNAL_ALERT // we watch and notify only — never claim it stops usage
+  PROVIDER_ALERT // a provider-side budget/alert exists, may not stop usage
+  PROVIDER_HARD_LIMIT // provider itself rejects usage past the limit
+  EMERGENCY_SHUTDOWN // our automation performs a destructive stop action
+}
+
+// Spec §34.2 — what a stop action for this provider/resource actually is.
+// Drives which UI copy and confirmation flow is shown; never invented per UI,
+// always read from here.
+enum StopActionCapability {
+  PROVIDER_NATIVE_HARD_LIMIT
+  AUTOMATED_SERVICE_SHUTDOWN // e.g. Cloud Run max-instances=0 (scoped)
+  BILLING_DISCONNECT // e.g. unlink GCP billing account from project (project-wide)
+  API_KEY_DISABLE_OR_ROTATION // OpenAI / Anthropic
+  MANUAL_ACTION_REQUIRED // e.g. shared GCP project — no safe auto action
+  MONITORING_ONLY
+}
+
+enum ThresholdActionType {
+  NOTIFY_ONLY
+  ESCALATE
+  TRIGGER_HARD_STOP
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum SyncJobStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+}
+
+// Spec §34.6 — required event types for the budget/hard-stop audit trail.
+enum BudgetEventType {
+  BUDGET_WARNING
+  BUDGET_CRITICAL
+  HARD_LIMIT_REACHED
+  HARD_STOP_STARTED
+  HARD_STOP_SUCCEEDED
+  HARD_STOP_FAILED
+  BUDGET_INCREASED
+  MANUAL_RESUME
+  AUTO_RESUME_NEW_CYCLE
+}
+
+enum BudgetEventActor {
+  SYSTEM
+  USER
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("owner") // single-tenant today; kept for forward-compat
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs      AuditLog[]
+  budgetsChanged BudgetEvent[] @relation("BudgetEventUser")
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Provider connections / discovery
+
+model ProviderConnection {
+  id                        String             @id @default(uuid())
+  provider                  Provider
+  displayName               String
+  status                    ConnectionStatus   @default(PENDING)
+  authType                  ConnectionAuthType
+  // Points at a Secret Manager secret version in production, or an encrypted
+  // local blob reference in dev. Never a plaintext secret. See lib/crypto.
+  encryptedSecretReference  String?
+  metadataJson              Json?
+  lastTestedAt              DateTime?
+  lastSyncAt                DateTime?
+  syncError                 String?
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
+
+  accounts  ProviderAccount[]
+  resources ProviderResource[]
+  syncJobs  SyncJob[]
+
+  @@map("provider_connections")
+}
+
+model ProviderAccount {
+  id                   String   @id @default(uuid())
+  providerConnectionId String
+  externalAccountId    String
+  displayName          String
+  accountType          String // e.g. "billing_account", "org", "workspace"
+  currency             String?
+  metadataJson         Json?
+
+  connection ProviderConnection @relation(fields: [providerConnectionId], references: [id], onDelete: Cascade)
+  resources  ProviderResource[]
+
+  @@unique([providerConnectionId, externalAccountId])
+  @@map("provider_accounts")
+}
+
+model ProviderResource {
+  id                   String    @id @default(uuid())
+  // Denormalized from account.connection — this, not providerAccountId, is
+  // the resource's stable identity scope. A GCP project's *billing account*
+  // can legitimately change between sync runs (billing disabled/re-enabled,
+  // moved to a different account) without the project itself becoming a
+  // different resource. Keying uniqueness on providerAccountId instead (the
+  // original design) meant every billing-account change silently created a
+  // duplicate orphan row rather than updating the existing one — that's
+  // exactly what produced the "27 unmapped projects, most already mapped
+  // under a different row" bug. providerAccountId below is still updated in
+  // place when the billing account changes; it's just no longer part of
+  // what makes two rows "the same resource".
+  providerConnectionId String
+  providerAccountId    String
+  externalResourceId   String
+  resourceType       String // e.g. "gcp_project", "openai_project", "anthropic_workspace"
+  displayName        String
+  status              String   @default("active")
+  parentExternalId   String?
+  metadataJson       Json?
+  discoveredAt       DateTime  @default(now())
+  lastSeenAt         DateTime  @default(now())
+
+  connection      ProviderConnection   @relation(fields: [providerConnectionId], references: [id], onDelete: Cascade)
+  account         ProviderAccount      @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+  appMappings     AppResourceMapping[]
+  costRecords     CostRecord[]
+
+  @@unique([providerConnectionId, resourceType, externalResourceId])
+  @@map("provider_resources")
+}
+
+// ---------------------------------------------------------------------------
+// Managed apps / sites and cost allocation
+
+model ManagedApp {
+  id                     String   @id @default(uuid())
+  name                   String
+  slug                   String   @unique
+  domain                 String?
+  active                 Boolean  @default(true)
+  ownerLabel             String?
+  notes                  String?
+  monthlyTargetCurrency  String   @default("USD")
+
+  // Hard Stop target (spec §34) — which specific Cloud Run service gets
+  // scaled to zero for this app. Deliberately separate from cost mapping
+  // (AppResourceMapping): billing export data is granular to GCP
+  // project/service/SKU, not to an individual deployed Cloud Run service
+  // name, so there is no way to derive this automatically from cost data.
+  // Both fields must be set together; nothing reads one without the other.
+  hardStopCloudRunRegion      String?
+  hardStopCloudRunServiceName String?
+
+  resourceMappings AppResourceMapping[]
+  costRecords      CostRecord[]
+  budgets          Budget[]
+  recurringExpenses RecurringExpense[]
+
+  @@map("managed_apps")
+}
+
+model AppResourceMapping {
+  id                 String               @id @default(uuid())
+  managedAppId       String
+  providerResourceId String
+  allocationMode     AllocationMode       @default(FULL)
+  allocationPercent  Decimal?             @db.Decimal(5, 2)
+  ruleJson           Json?
+  confidence         AllocationConfidence @default(EXACT)
+
+  managedApp       ManagedApp       @relation(fields: [managedAppId], references: [id], onDelete: Cascade)
+  providerResource ProviderResource @relation(fields: [providerResourceId], references: [id], onDelete: Cascade)
+
+  @@unique([managedAppId, providerResourceId])
+  @@map("app_resource_mappings")
+}
+
+// ---------------------------------------------------------------------------
+// Cost data
+
+model CostRecord {
+  id                 String    @id @default(uuid())
+  provider           Provider
+  providerAccountId  String
+  providerResourceId String
+  managedAppId       String?
+  usageDate          DateTime  @db.Date
+  currency           String
+  grossCost          Decimal   @db.Decimal(14, 4)
+  credits            Decimal   @default(0) @db.Decimal(14, 4)
+  netCost            Decimal   @db.Decimal(14, 4)
+  // Empty string, never null, when the provider row has no service/sku — so
+  // the natural-key unique constraint below behaves predictably (Postgres
+  // treats NULL as distinct-from-everything in unique constraints, which
+  // would silently defeat idempotency for exactly the rows most likely to
+  // repeat, e.g. tax/adjustment lines with no SKU).
+  service            String
+  sku                String
+  sourceReference    String?
+  // Fingerprint of the source row's values, kept for audit/debugging (e.g.
+  // "did this day's number change since last sync because Google issued a
+  // late correction?"). NOT the idempotency mechanism — see natural key
+  // below. Billing-export rows can be corrected/adjusted for a few days
+  // after initial export, so keying idempotency on a hash of the cost value
+  // itself would insert a second row instead of updating the first,
+  // silently double-counting in every SUM() query downstream.
+  rawHash            String
+  metadataJson       Json?
+  importedAt         DateTime  @default(now())
+
+  providerResource ProviderResource @relation(fields: [providerResourceId], references: [id], onDelete: Cascade)
+  managedApp       ManagedApp?      @relation(fields: [managedAppId], references: [id])
+
+  // The true idempotency constraint: one row per resource/day/service/sku/
+  // currency. Sync always upserts on this key, so a late correction from
+  // Google updates the existing row instead of duplicating it.
+  @@unique([providerResourceId, usageDate, service, sku, currency], name: "cost_record_natural_key")
+  @@index([providerResourceId, usageDate])
+  @@index([managedAppId, usageDate])
+  @@map("cost_records")
+}
+
+// ---------------------------------------------------------------------------
+// Budgets, thresholds, hard stop
+
+model Budget {
+  id               String          @id @default(uuid())
+  scopeType        BudgetScopeType
+  scopeId          String
+  managedAppId     String?
+  provider         Provider
+  amount           Decimal         @db.Decimal(14, 2)
+  currency         String
+  period           String          @default("monthly")
+  enforcementType  EnforcementType @default(INTERNAL_ALERT)
+  providerBudgetId String?
+
+  // Spec §34.1 — Hard Stop configuration, per scope.
+  warningLimitPercent            Decimal @default(80) @db.Decimal(5, 2)
+  hardLimitPercent               Decimal @default(100) @db.Decimal(5, 2)
+  hardStopEnabled                Boolean @default(false)
+  autoResumeNextBillingCycle     Boolean @default(false)
+  manualResumeRequiresBudgetIncrease Boolean @default(true)
+
+  active    Boolean  @default(true)
+  startsAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  managedApp ManagedApp?        @relation(fields: [managedAppId], references: [id])
+  thresholds BudgetThreshold[]
+  events     BudgetEvent[]
+
+  @@map("budgets")
+}
+
+model BudgetThreshold {
+  id              String              @id @default(uuid())
+  budgetId        String
+  percent         Decimal             @db.Decimal(5, 2)
+  notifyEmail     String?
+  actionType      ThresholdActionType @default(NOTIFY_ONLY)
+  triggeredAt     DateTime?
+  // Prevents re-alerting for the same threshold within the same monthly
+  // cycle on repeated sync runs (spec §14 anti-spam behavior).
+  triggerCycleKey String?
+
+  budget Budget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+
+  @@unique([budgetId, percent, triggerCycleKey])
+  @@map("budget_thresholds")
+}
+
+// Spec §34.6 — permanent audit trail dedicated to budget/hard-stop events,
+// distinct from the general AuditLog (which covers all sensitive actions).
+model BudgetEvent {
+  id                String           @id @default(uuid())
+  budgetId          String
+  eventType         BudgetEventType
+  actor             BudgetEventActor
+  userId            String?
+  spendAtEvent      Decimal?         @db.Decimal(14, 2)
+  percentConsumed   Decimal?         @db.Decimal(5, 2)
+  stopActionRequested String?
+  stopActionResult    String?
+  providerResponse    Json?
+  // Snapshot of whatever this system is about to change, so resume (§34.7
+  // step 8) can reverse exactly what it did and nothing else — e.g. the
+  // Cloud Run service's previous max-instances value, or the previous
+  // billing account link.
+  preActionStateJson  Json?
+  previousBudgetAmount Decimal?       @db.Decimal(14, 2)
+  newBudgetAmount      Decimal?       @db.Decimal(14, 2)
+  resumedAt            DateTime?
+  createdAt             DateTime        @default(now())
+
+  budget Budget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  user   User?  @relation("BudgetEventUser", fields: [userId], references: [id])
+
+  @@index([budgetId, createdAt])
+  @@map("budget_events")
+}
+
+// ---------------------------------------------------------------------------
+// Manual/recurring costs not visible through any provider API
+
+model RecurringExpense {
+  id               String    @id @default(uuid())
+  providerName     String // e.g. "ChatGPT Plus" — free text, not the Provider enum
+  label            String
+  managedAppId     String?
+  amount           Decimal   @db.Decimal(14, 2)
+  currency         String
+  recurrence       String    @default("monthly")
+  nextRenewalDate  DateTime? @db.Date
+  active           Boolean   @default(true)
+  notes            String?
+
+  managedApp ManagedApp? @relation(fields: [managedAppId], references: [id])
+
+  @@map("recurring_expenses")
+}
+
+// ---------------------------------------------------------------------------
+// Alerts, sync jobs, audit
+
+model Alert {
+  id               String        @id @default(uuid())
+  severity         AlertSeverity
+  type             String
+  provider         Provider?
+  scopeType        BudgetScopeType?
+  scopeId          String?
+  title            String
+  body             String
+  status           AlertStatus   @default(OPEN)
+  firstDetectedAt  DateTime      @default(now())
+  lastDetectedAt   DateTime      @default(now())
+  acknowledgedAt   DateTime?
+
+  @@index([status, severity])
+  @@map("alerts")
+}
+
+model SyncJob {
+  id                   String        @id @default(uuid())
+  providerConnectionId String
+  jobType              String // e.g. "google_bigquery_cost_sync", "google_budget_sync"
+  startedAt            DateTime      @default(now())
+  finishedAt           DateTime?
+  status               SyncJobStatus @default(RUNNING)
+  recordsProcessed     Int           @default(0)
+  error                String?
+
+  connection ProviderConnection @relation(fields: [providerConnectionId], references: [id], onDelete: Cascade)
+
+  @@index([providerConnectionId, startedAt])
+  @@map("sync_jobs")
+}
+
+model AuditLog {
+  id                String      @id @default(uuid())
+  actorUserId       String?
+  actorLabel        String // resolved label even if user is later deleted
+  action            String
+  provider          Provider?
+  resource          String?
+  oldValue          Json?
+  newValue          Json?
+  result            AuditResult
+  errorSummary      String?
+  requestCorrelationId String?
+  createdAt         DateTime    @default(now())
+
+  actor User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([createdAt])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Invoices — owner request: a monthly "Invoices" page, presentable to
+// whoever pays for the sites. One row per (provider, completed calendar
+// month) — currently GOOGLE_CLOUD (auto-generated, see
+// lib/invoices/generate.ts) and RENDER (owner enters it once a month
+// through /invoices/render/new, since Render's API exposes no cost data at
+// all — see lib/providers/render/adapter.ts capabilities comment; the
+// numbers come from Render's own closed-month Invoice History page).
+// Neither is the provider's own legal invoice PDF — Google exposes no API
+// for that either (Console-only download) — this is PAY SCOPE's own
+// generated summary, with a per-item breakdown carried in breakdownJson and
+// rendered as a table inside the PDF itself.
+
+model Invoice {
+  id               String   @id @default(uuid())
+  provider         Provider @default(GOOGLE_CLOUD)
+  // Fixed to "reshetimes-org" today (single-tenant app) — kept as a field,
+  // not a hardcoded label, for whenever a second org is ever in scope.
+  organizationName String
+  periodStart      DateTime @db.Date
+  periodEnd        DateTime @db.Date
+  currency         String
+  totalAmount      Decimal  @db.Decimal(14, 2)
+  generatedAt      DateTime @default(now())
+  pdfBytes         Bytes
+  pdfFilename      String
+  // GOOGLE_CLOUD: array of { billingAccountId, billingAccountName, amount,
+  // currency } — one entry per billing account that had spend this month.
+  // RENDER: array of { name, amount } — one entry per service on that
+  // month's Render invoice. Denormalized (not a relation) for the same
+  // reason billingAccountName was denormalized before: a later-deleted/
+  // renamed resource must not take a past invoice's breakdown down with it.
+  breakdownJson    Json
+
+  // One invoice per provider per month — re-generating an already-completed
+  // month (e.g. a late BigQuery correction, or a corrected manual entry)
+  // updates the existing row rather than piling up duplicates.
+  @@unique([provider, periodStart])
+  @@index([periodStart])
+  @@map("invoices")
+}

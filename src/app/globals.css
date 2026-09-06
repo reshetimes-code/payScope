@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, Arial, sans-serif;
+  /* Warm dark theme per the owner's request ("warmer, darker background,
+     purple/black/white, pleasant to look at, must look great on phone").
+     "stone" instead of "gray"/"slate" on purpose — it carries a brown/amber
+     undertone instead of a cold blue-gray one. */
+  background-color: #100d0b;
+  color: #f5f2ef;
+}
+
+@layer components {
+  /* Shared surfaces so every page reads as one product instead of a pile of
+     ad-hoc divs — spec has no visual-design requirements, this is purely
+     for "looks professional" per the owner's request. */
+  .card {
+    @apply rounded-xl border border-stone-800 bg-stone-900 p-5 shadow-sm shadow-black/20;
+  }
+  .card-table {
+    @apply overflow-x-auto rounded-xl border border-stone-800 bg-stone-900 shadow-sm shadow-black/20;
+  }
+  .page-shell {
+    @apply mx-auto max-w-6xl p-4 sm:p-8;
+  }
+  .page-title {
+    @apply text-xl font-semibold tracking-tight text-stone-50 sm:text-2xl;
+  }
+  .page-subtitle {
+    @apply mt-1 text-sm text-stone-400;
+  }
+  .table-head {
+    @apply bg-stone-950/40 text-right text-xs font-medium uppercase tracking-wide text-stone-400;
+  }
+  .stat-label {
+    @apply text-xs font-medium text-stone-400;
+  }
+  .stat-value {
+    @apply mt-1.5 text-xl font-semibold tracking-tight text-stone-50;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset;
+  }
+  .badge-warn {
+    @apply badge bg-orange-500/10 text-orange-400 ring-orange-500/30;
+  }
+  .badge-ok {
+    @apply badge bg-green-500/10 text-green-400 ring-green-500/30;
+  }
+  .badge-danger {
+    @apply badge bg-red-500/10 text-red-400 ring-red-500/30;
+  }
+  .badge-neutral {
+    @apply badge bg-stone-500/10 text-stone-400 ring-stone-500/20;
+  }
+  /* Brand accent — purple/black/white throughout, everywhere else (budget
+     risk badges above, status dots) stays semantic red/orange/green on
+     purpose so risk is still readable at a glance regardless of brand. */
+  .btn-primary {
+    @apply rounded-md bg-purple-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-purple-950/50 transition-colors hover:bg-purple-500 disabled:opacity-50 sm:py-2;
+  }
+  .btn-secondary {
+    @apply rounded-md border border-stone-700 bg-stone-900 px-4 py-2.5 text-sm font-medium text-stone-200 transition-colors hover:border-stone-600 hover:bg-stone-800 disabled:opacity-50 sm:py-2;
+  }
+  .link {
+    @apply text-purple-400 underline underline-offset-2 hover:text-purple-300;
+  }
+  .link-strong {
+    @apply font-medium text-purple-400 underline underline-offset-2 hover:text-purple-300;
+  }
+  /* Every <input>/<select> in the app shares this — otherwise the browser's
+     default white form-control background sits like a hole punched through
+     a dark page. */
+  .field {
+    @apply rounded-md border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500;
+  }
+}
+
+/* Owner request: on the phone, text must be unmistakably readable — larger
+   and heavier than the desktop sizes, clear even for low-vision users, not
+   just "technically legible". Scoped to <768px only; desktop is untouched.
+   `!important` is needed here because every value below is overriding a
+   Tailwind utility (.text-xs/.text-sm) or an @apply-compiled component class
+   that already carries its own font-size — this is the one place in the app
+   that reaches all of them at once instead of editing every page. */
+@media (max-width: 767px) {
+  body {
+    /* Only raises the *default* weight — anything already set to font-medium
+       /font-semibold/font-bold (a Tailwind utility, same specificity as this
+       element selector but declared later in the cascade) still wins, so
+       headings and labels keep their own heavier weight on top of this. */
+    font-weight: 500;
+  }
+
+  .text-xs,
+  .table-head,
+  .stat-label,
+  .badge {
+    font-size: 0.9375rem !important; /* 12px → 15px */
+    line-height: 1.4rem !important;
+  }
+
+  .text-sm,
+  .page-subtitle,
+  .btn-primary,
+  .btn-secondary,
+  .field {
+    font-size: 1.0625rem !important; /* 14px → 17px */
+    line-height: 1.55rem !important;
+  }
+
+  .page-title {
+    font-size: 1.5rem !important; /* 20px → 24px */
+  }
+
+  .stat-value {
+    font-size: 1.625rem !important; /* 20px → 26px */
+  }
+}

@@ -1,0 +1,10 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --target=builder
+      - -t
+      - me-west1-docker.pkg.dev/reshet-times-agreements/payscope/migrate:latest
+      - .
+images:
+  - me-west1-docker.pkg.dev/reshet-times-agreements/payscope/migrate:latest

@@ -1,0 +1,29 @@
+# Deploy source excludes — gcloud does NOT reliably fall back to .gitignore
+# when this directory isn't a git repo, so this list is explicit and must be
+# kept in sync with .dockerignore/.gitignore.
+.git
+.gcloudignore
+node_modules
+.next
+out
+build
+
+.env
+.env.local
+.env*.local
+*service-account*.json
+gcp-key*.json
+*.pem
+
+.DS_Store
+npm-debug.log*
+*.tsbuildinfo
+
+prisma/dev.db
+
+undefined
+scripts
+README.md
+DECISIONS.md
+COST_CONTROL_CENTER_SPEC.md
+COST_CONTROL_CENTER_SPEC_MORE.md

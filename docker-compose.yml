@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cost_control
+      POSTGRES_PASSWORD: cost_control_local_dev
+      POSTGRES_DB: cost_control_center
+    ports:
+      # Host port 5435, not 5432 — 5432 is already used by another local
+      # project's Postgres container on this machine.
+      - '5435:5432'
+    volumes:
+      - cost_control_pgdata:/var/lib/postgresql/data
+
+volumes:
+  cost_control_pgdata:

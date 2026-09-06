@@ -1,0 +1,34 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# env — never commit real secrets
+.env
+.env.local
+.env*.local
+
+# local credentials — never commit a downloaded GCP key
+*service-account*.json
+gcp-key*.json
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# prisma
+/prisma/dev.db
+
+# stray tsx/esbuild transpile cache
+/undefined/
