@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { prisma } from '@/lib/db/prisma';
 import { monthProgress, projectedMonthEnd } from '@/lib/forecast/mtd';
@@ -81,6 +82,18 @@ export default async function DashboardPage() {
     }),
     prisma.providerConnection.findFirst({ where: { provider: 'GOOGLE_CLOUD' } }),
   ]);
+  // Mishpatly moved to its own dedicated Google billing account (a separate
+  // Google account, free-trial credit) hosting just this one site — shown in
+  // its own table instead of the shared "שרת Google" one (owner request).
+  const MISHPATLY_SERVER = {
+    billingAccountId: '01E827-C97C35-0E6222',
+    accountEmail: 'msptly7@gmail.com',
+    domain: 'mishpatly.co.il',
+  };
+  const isMishpatly = (s: { name: string; domain: string | null }) =>
+    s.domain === MISHPATLY_SERVER.domain || s.name.toLowerCase() === 'mishpatly';
+  const mishpatlySites = sites.filter(isMishpatly);
+  const mainSites = sites.filter((s) => !isMishpatly(s));
   const sitesCount = sites.length;
   const unmappedCount = unmappedGoogleResources.length;
 
@@ -272,6 +285,129 @@ export default async function DashboardPage() {
     if (percent >= 90) atRiskCount++;
   }
 
+  const renderSiteRow = (site: (typeof sites)[number], authUserParam: string, billingCellOverride?: ReactNode) => {
+      const spendEntry = spendBySite.get(site.id);
+      const spend = spendEntry?.amount ?? 0;
+      const spendCurrency = spendEntry?.currency ?? '';
+      const budget = site.budgets[0];
+      const budgetAmount = budget ? Number(budget.amount) : null;
+      const percent = budgetAmount && budgetAmount > 0 ? (spend / budgetAmount) * 100 : null;
+      // A site can (rarely) span resources on more than one
+      // billing account — show every distinct one, not just the
+      // first, so nothing is silently hidden.
+      const billingAccounts = [
+        ...new Map(
+          site.resourceMappings.map((m) => [
+            m.providerResource.account.externalAccountId,
+            m.providerResource.account,
+          ]),
+        ).values(),
+      ];
+
+      return (
+        <TableRow
+          key={site.id}
+          cells={[
+            {
+              header: 'קישור לאתר',
+              content: site.domain ? (
+                <a
+                  href={`https://${site.domain}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`פתח את ${site.domain}`}
+                  className="text-stone-500 hover:text-purple-400"
+                >
+                  {/* External-link icon — opens the site's real live URL, not this app */}
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M6.5 3.5H3.5A1.5 1.5 0 0 0 2 5v7.5A1.5 1.5 0 0 0 3.5 14H11a1.5 1.5 0 0 0 1.5-1.5V9.5M9.5 2H14v4.5M14 2 7 9"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </a>
+              ) : (
+                <span className="text-stone-700" title="אין כתובת ידועה לאתר זה">
+                  —
+                </span>
+              ),
+            },
+            {
+              header: 'אתר',
+              primary: true,
+              content: (
+                <Link href={`/apps/${site.id}`} className="link-strong">
+                  {site.name}
+                </Link>
+              ),
+            },
+            {
+              header: 'חשבון חיוב',
+              content:
+                billingCellOverride !== undefined ? (
+                  billingCellOverride
+                ) : billingAccounts.length === 0 ? (
+                  <span className="text-stone-700">—</span>
+                ) : (
+                  <span className="text-xs">
+                    {billingAccounts.map((a) => (
+                      <div key={a.externalAccountId}>
+                        <a
+                          href={`https://console.cloud.google.com/billing/${a.externalAccountId}/documents${authUserParam}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`חשבוניות של ${a.displayName} (${a.externalAccountId}) ב-Google Cloud Console`}
+                          className="text-stone-400 underline decoration-dotted hover:text-purple-400"
+                        >
+                          {billingAccountLabels.get(a.externalAccountId)}
+                        </a>
+                      </div>
+                    ))}
+                  </span>
+                ),
+            },
+            {
+              header: 'משאבים',
+              content: <span className="text-xs text-stone-400">{site.resourceMappings.length}</span>,
+            },
+            {
+              header: 'הוצאה החודש',
+              content: `${spend.toFixed(2)} ${spendCurrency}`,
+            },
+            {
+              header: 'תקציב',
+              content: budgetAmount !== null ? `${budgetAmount.toFixed(2)} ${budget!.currency}` : '—',
+            },
+            {
+              header: 'ניצול',
+              primary: true,
+              content:
+                percent === null ? (
+                  '—'
+                ) : (
+                  <span
+                    className={
+                      percent >= 100
+                        ? 'text-red-400'
+                        : percent >= 90
+                          ? 'text-orange-400'
+                          : percent >= 75
+                            ? 'text-yellow-400'
+                            : 'text-green-400'
+                    }
+                  >
+                    {percent.toFixed(0)}%
+                  </span>
+                ),
+            },
+          ]}
+        />
+      );
+  };
+
   const cards = [
     { label: 'סה״כ הוצאות החודש', value: formatByCurrency(totalSpendByCurrency) },
     { label: 'תקציב חודשי כולל', value: formatByCurrency(totalBudgetByCurrency), warn: true },
@@ -347,7 +483,7 @@ export default async function DashboardPage() {
         הערכה לפי §5.8 בספק.
       </p>
 
-      {(sites.length > 0 || unmappedGoogleResources.length > 0) && (
+      {(mainSites.length > 0 || unmappedGoogleResources.length > 0) && (
         <section className="mt-6">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-sm font-medium text-stone-300">שרת Google</h2>
@@ -386,126 +522,7 @@ export default async function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {sites.map((site) => {
-                  const spendEntry = spendBySite.get(site.id);
-                  const spend = spendEntry?.amount ?? 0;
-                  const spendCurrency = spendEntry?.currency ?? '';
-                  const budget = site.budgets[0];
-                  const budgetAmount = budget ? Number(budget.amount) : null;
-                  const percent = budgetAmount && budgetAmount > 0 ? (spend / budgetAmount) * 100 : null;
-                  // A site can (rarely) span resources on more than one
-                  // billing account — show every distinct one, not just the
-                  // first, so nothing is silently hidden.
-                  const billingAccounts = [
-                    ...new Map(
-                      site.resourceMappings.map((m) => [
-                        m.providerResource.account.externalAccountId,
-                        m.providerResource.account,
-                      ]),
-                    ).values(),
-                  ];
-
-                  return (
-                    <TableRow
-                      key={site.id}
-                      cells={[
-                        {
-                          header: 'קישור לאתר',
-                          content: site.domain ? (
-                            <a
-                              href={`https://${site.domain}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              title={`פתח את ${site.domain}`}
-                              className="text-stone-500 hover:text-purple-400"
-                            >
-                              {/* External-link icon — opens the site's real live URL, not this app */}
-                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path
-                                  d="M6.5 3.5H3.5A1.5 1.5 0 0 0 2 5v7.5A1.5 1.5 0 0 0 3.5 14H11a1.5 1.5 0 0 0 1.5-1.5V9.5M9.5 2H14v4.5M14 2 7 9"
-                                  stroke="currentColor"
-                                  strokeWidth="1.4"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            </a>
-                          ) : (
-                            <span className="text-stone-700" title="אין כתובת ידועה לאתר זה">
-                              —
-                            </span>
-                          ),
-                        },
-                        {
-                          header: 'אתר',
-                          primary: true,
-                          content: (
-                            <Link href={`/apps/${site.id}`} className="link-strong">
-                              {site.name}
-                            </Link>
-                          ),
-                        },
-                        {
-                          header: 'חשבון חיוב',
-                          content:
-                            billingAccounts.length === 0 ? (
-                              <span className="text-stone-700">—</span>
-                            ) : (
-                              <span className="text-xs">
-                                {billingAccounts.map((a) => (
-                                  <div key={a.externalAccountId}>
-                                    <a
-                                      href={`https://console.cloud.google.com/billing/${a.externalAccountId}/documents${googleAuthUserParam}`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      title={`חשבוניות של ${a.displayName} (${a.externalAccountId}) ב-Google Cloud Console`}
-                                      className="text-stone-400 underline decoration-dotted hover:text-purple-400"
-                                    >
-                                      {billingAccountLabels.get(a.externalAccountId)}
-                                    </a>
-                                  </div>
-                                ))}
-                              </span>
-                            ),
-                        },
-                        {
-                          header: 'משאבים',
-                          content: <span className="text-xs text-stone-400">{site.resourceMappings.length}</span>,
-                        },
-                        {
-                          header: 'הוצאה החודש',
-                          content: `${spend.toFixed(2)} ${spendCurrency}`,
-                        },
-                        {
-                          header: 'תקציב',
-                          content: budgetAmount !== null ? `${budgetAmount.toFixed(2)} ${budget!.currency}` : '—',
-                        },
-                        {
-                          header: 'ניצול',
-                          primary: true,
-                          content:
-                            percent === null ? (
-                              '—'
-                            ) : (
-                              <span
-                                className={
-                                  percent >= 100
-                                    ? 'text-red-400'
-                                    : percent >= 90
-                                      ? 'text-orange-400'
-                                      : percent >= 75
-                                        ? 'text-yellow-400'
-                                        : 'text-green-400'
-                                }
-                              >
-                                {percent.toFixed(0)}%
-                              </span>
-                            ),
-                        },
-                      ]}
-                    />
-                  );
-                })}
+                {mainSites.map((site) => renderSiteRow(site, googleAuthUserParam))}
                 {unmappedGoogleResources.map((resource) => (
                   <TableRow
                     key={resource.id}
@@ -568,6 +585,58 @@ export default async function DashboardPage() {
                     ]}
                   />
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {mishpatlySites.length > 0 && (
+        <section className="mt-6">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-sm font-medium text-stone-300">שרת משפט לי (שרת ייעודי)</h2>
+            <a
+              href={`https://console.cloud.google.com/billing/${MISHPATLY_SERVER.billingAccountId}?authuser=${encodeURIComponent(MISHPATLY_SERVER.accountEmail)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="btn-secondary !py-1.5 !px-3 text-xs"
+            >
+              פתח את Billing של משפט לי ↗
+            </a>
+          </div>
+          <p className="mt-1 text-xs text-stone-500">
+            חשבון חיוב נפרד, רק לאתר הזה · תחת חשבון מייל{' '}
+            <span dir="ltr" className="font-medium text-stone-300">{MISHPATLY_SERVER.accountEmail}</span>
+          </p>
+          <div className="mt-2 card-table">
+            <table className="w-full text-sm">
+              <thead className="table-head hidden md:table-header-group">
+                <tr>
+                  <th className="p-3"></th>
+                  <th className="p-3">אתר</th>
+                  <th className="p-3">חשבון חיוב</th>
+                  <th className="p-3">משאבים</th>
+                  <th className="p-3">הוצאה החודש</th>
+                  <th className="p-3">תקציב</th>
+                  <th className="p-3">ניצול</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mishpatlySites.map((site) =>
+                  renderSiteRow(
+                    site,
+                    `?authuser=${encodeURIComponent(MISHPATLY_SERVER.accountEmail)}`,
+                    <a
+                      href={`https://console.cloud.google.com/billing/${MISHPATLY_SERVER.billingAccountId}/documents?authuser=${encodeURIComponent(MISHPATLY_SERVER.accountEmail)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`חשבוניות של ${MISHPATLY_SERVER.billingAccountId} ב-Google Cloud Console`}
+                      className="text-xs text-stone-400 underline decoration-dotted hover:text-purple-400"
+                    >
+                      <span dir="ltr">{MISHPATLY_SERVER.billingAccountId}</span>
+                    </a>,
+                  ),
+                )}
               </tbody>
             </table>
           </div>
