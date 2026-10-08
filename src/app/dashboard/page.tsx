@@ -289,7 +289,13 @@ export default async function DashboardPage() {
       const spendEntry = spendBySite.get(site.id);
       const spend = spendEntry?.amount ?? 0;
       const spendCurrency = spendEntry?.currency ?? '';
-      const budget = site.budgets[0];
+      // Budgets set from /budgets are scoped to a single GCP project
+      // (PROVIDER_RESOURCE, managedAppId unset), so a site-level budget alone
+      // would miss them — fall back to one on any project mapped to this site.
+      const mappedResourceIds = new Set(site.resourceMappings.map((m) => m.providerResourceId));
+      const budget =
+        site.budgets[0] ??
+        budgetRows.find((b) => b.scopeType === 'PROVIDER_RESOURCE' && mappedResourceIds.has(b.scopeId));
       const budgetAmount = budget ? Number(budget.amount) : null;
       const percent = budgetAmount && budgetAmount > 0 ? (spend / budgetAmount) * 100 : null;
       // A site can (rarely) span resources on more than one
