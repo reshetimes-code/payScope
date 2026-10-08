@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { verifyInternalRequest } from '@/lib/auth/verify-internal';
-import { runGoogleDiscoverySync, runGoogleCostSync } from '@/lib/providers/google/sync';
+import { runGoogleDiscoverySync, runGoogleCostSync, runGoogleBudgetSync } from '@/lib/providers/google/sync';
 import { evaluateGoogleBudgets } from '@/lib/alerts/evaluate-budgets';
 import { executeGoogleHardStops } from '@/lib/alerts/execute-hard-stops';
 
@@ -31,12 +31,15 @@ export async function POST(req: Request) {
     // Evaluate thresholds against the numbers we just synced, not stale
     // ones — alerting off cost data from hours ago defeats the point of a
     // 3-hour sync cadence (spec §16).
+    const budgets = await runGoogleBudgetSync().catch((e) => ({
+      error: e instanceof Error ? e.message : 'budget sync failed',
+    }));
     const alerts = await evaluateGoogleBudgets(now);
     // Runs after alerting, on the same freshly-synced numbers. Only ever
     // touches budgets with hardStopEnabled=true (spec §34.11 opt-in) — see
     // src/lib/alerts/execute-hard-stops.ts for every other precondition.
     const hardStops = await executeGoogleHardStops(now);
-    return NextResponse.json({ discovery, costs, alerts, hardStops });
+    return NextResponse.json({ discovery, costs, budgets, alerts, hardStops });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Sync failed';
     console.error('Google sync job failed:', message);

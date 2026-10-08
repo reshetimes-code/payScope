@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { auth } from '@/lib/auth';
-import { runGoogleCostSync } from '@/lib/providers/google/sync';
+import { runGoogleCostSync, runGoogleBudgetSync } from '@/lib/providers/google/sync';
 import { evaluateGoogleBudgets } from '@/lib/alerts/evaluate-budgets';
 import { getGoogleAuthClientFromSession } from '@/lib/providers/google/user-auth';
 import { writeAuditLog } from '@/lib/audit/log';
@@ -29,18 +29,22 @@ export async function POST(req: Request) {
 
   try {
     const costs = await runGoogleCostSync(from, now, authClient);
+    // Before alerting, so budgets set directly in Google are evaluated too.
+    const budgets = await runGoogleBudgetSync(authClient).catch((e) => ({
+      error: e instanceof Error ? e.message : 'budget sync failed',
+    }));
     const alerts = await evaluateGoogleBudgets(now);
 
     await writeAuditLog({
       actorLabel: session.user.email,
       action: 'google.syncCosts',
       provider: 'GOOGLE_CLOUD',
-      newValue: { costs, alerts },
+      newValue: { costs, budgets, alerts },
       result: 'SUCCESS',
       requestCorrelationId: correlationId,
     });
 
-    return NextResponse.json({ costs, alerts });
+    return NextResponse.json({ costs, budgets, alerts });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Cost sync failed';
     await writeAuditLog({

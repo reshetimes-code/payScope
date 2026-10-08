@@ -8,6 +8,7 @@ import { prisma } from '@/lib/db/prisma';
 import { discoverAccessibleProjects } from './resource-manager';
 import { listBillingAccounts, getProjectBillingInfo } from './billing';
 import { createGoogleAdapter } from './adapter';
+import { listBudgets } from './budgets';
 
 const UNKNOWN_BILLING_ACCOUNT_EXTERNAL_ID = 'unknown';
 
@@ -331,4 +332,87 @@ export async function runGoogleCostSync(
   });
 
   return { billingAccountsProcessed: accounts.length, recordsUpserted, errors };
+}
+
+export interface BudgetSyncSummary {
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+}
+
+/**
+ * Pulls budgets that already exist in Google (e.g. created directly in the
+ * Cloud Console, not via this app) into the Budget table, so the dashboard
+ * and /budgets show what Google actually has. Only project-scoped budgets
+ * are imported — an account-wide budget has no single PROVIDER_RESOURCE to
+ * attach to. Google's amount/currency win over the local copy.
+ */
+export async function runGoogleBudgetSync(authClient?: OAuth2Client): Promise<BudgetSyncSummary> {
+  const summary: BudgetSyncSummary = { imported: 0, updated: 0, skipped: 0, errors: [] };
+  const accounts = await prisma.providerAccount.findMany({
+    where: {
+      accountType: 'billing_account',
+      externalAccountId: { not: UNKNOWN_BILLING_ACCOUNT_EXTERNAL_ID },
+      connection: { provider: 'GOOGLE_CLOUD' },
+    },
+    include: { resources: true },
+  });
+
+  for (const account of accounts) {
+    let budgets;
+    try {
+      budgets = await listBudgets(account.externalAccountId, authClient);
+    } catch (err) {
+      summary.errors.push(
+        `${account.externalAccountId}: ${err instanceof Error ? err.message : 'budget list failed'}`,
+      );
+      continue;
+    }
+
+    for (const b of budgets) {
+      const resource =
+        b.scopedProjectNumbers.length === 1
+          ? account.resources.find(
+              (r) => (r.metadataJson as { projectNumber?: string } | null)?.projectNumber === b.scopedProjectNumbers[0],
+            )
+          : undefined;
+      if (!resource || b.amount <= 0) {
+        summary.skipped++;
+        continue;
+      }
+
+      const existing =
+        (await prisma.budget.findFirst({ where: { providerBudgetId: b.name } })) ??
+        (await prisma.budget.findFirst({
+          where: { scopeType: 'PROVIDER_RESOURCE', scopeId: resource.id, provider: 'GOOGLE_CLOUD' },
+        }));
+
+      if (existing) {
+        await prisma.budget.update({
+          where: { id: existing.id },
+          data: { amount: b.amount, currency: b.currencyCode, providerBudgetId: b.name, active: true },
+        });
+        summary.updated++;
+      } else {
+        const created = await prisma.budget.create({
+          data: {
+            scopeType: 'PROVIDER_RESOURCE',
+            scopeId: resource.id,
+            provider: 'GOOGLE_CLOUD',
+            amount: b.amount,
+            currency: b.currencyCode,
+            enforcementType: 'PROVIDER_ALERT',
+            providerBudgetId: b.name,
+          },
+        });
+        for (const percent of b.thresholdsPercent) {
+          await prisma.budgetThreshold.create({ data: { budgetId: created.id, percent } });
+        }
+        summary.imported++;
+      }
+    }
+  }
+
+  return summary;
 }
